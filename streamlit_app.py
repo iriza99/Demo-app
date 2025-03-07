@@ -129,7 +129,7 @@ if uploaded_file:
                 "eval_metric": "rmse"
             }
 
-            final_model = xgb.train(params, dtrain, num_boost_round=900)
+            final_model = xgb.train(params, dtrain, num_boost_round=2)
 
             # Guardamos el modelo en la sesión
             st.session_state["modelo"] = final_model
