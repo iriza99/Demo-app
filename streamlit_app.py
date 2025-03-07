@@ -74,139 +74,88 @@ tab_entrenar, tab_predecir = st.tabs(["Entrenamiento", "Predicción"])
 # -----------------------------------------------------------
 # TAB DE ENTRENAMIENTO
 # -----------------------------------------------------------
-import streamlit as st
-import pandas as pd
-import xgboost as xgb
-import shap
-import matplotlib.pyplot as plt
 
-with tab_entrenar:
-    st.markdown("<div class='card'>", unsafe_allow_html=True)
-    st.markdown("<h2>Entrenamiento de Modelo</h2>", unsafe_allow_html=True)
-    st.markdown("""
-    <p>
-    Configura y entrena tu modelo de Machine Learning con tu dataset. Primero, carga tu CSV (separado por ';') y asegúrate
-    de que contenga la columna <strong>FEV1por_Actualpor</strong> junto con 
-    otras variables que consideres relevantes (edad, tiempo post-trasplante, etc.).
-    </p>
-    """, unsafe_allow_html=True)
+st.markdown("<h2>Entrenamiento de Modelo</h2>", unsafe_allow_html=True)
+st.markdown("""
+<p>
+Carga tu dataset y entrena un modelo XGBoost. 
+Asegúrate de incluir la columna <strong>FEV1por_Actualpor</strong> como variable objetivo.
+</p>
+""", unsafe_allow_html=True)
+
+uploaded_file = st.file_uploader("Selecciona tu CSV", type=["csv"])
+if uploaded_file:
+    df = pd.read_csv(uploaded_file, sep=';')
+    st.write("Vista previa de los datos:")
+    st.dataframe(df.head())
+
+    # Información sobre los datos
+    st.write(f"Número de muestras: {df.shape[0]}")
+    st.write(f"Número de columnas: {df.shape[1]}")
+
+    # Verificamos si hay columna "Registro"
+    if "Registro" in df.columns:
+        num_pacientes = df["Registro"].nunique()
+        st.write(f"Número de pacientes diferentes: {num_pacientes}")
+
+    # Excluir columnas no relevantes
+    cols_excluir = [col for col in ["Fecha", "Registro"] if col in df.columns]
+    if cols_excluir:
+        df = df.drop(columns=cols_excluir)
+
+    # Selección de variables
+    col1, col2 = st.columns(2)
+    with col1:
+        target_col = st.selectbox("Variable objetivo", ["FEV1por_Actualpor"])
+    with col2:
+        algo = st.selectbox("Algoritmo", ["XGBoost"])
 
     # -------------------------------------------------------
-    # SI EL CSV SE BORRA, REINICIAMOS TODO EL ESTADO
+    # ENTRENAMIENTO DEL MODELO
     # -------------------------------------------------------
-    if "uploaded_csv" in st.session_state and st.session_state["uploaded_csv"] is not None:
-        if st.session_state["uploaded_csv"] is None:
-            st.session_state.clear()
-            st.experimental_rerun()
+    if st.button("Iniciar Entrenamiento"):
+        with st.spinner("Entrenando el modelo con 900 iteraciones..."):
+            X = df.drop(columns=[target_col])
+            y = df[target_col]
 
-    # Subir dataset
-    uploaded_file = st.file_uploader("Selecciona tu CSV", type=["csv"])
-    st.session_state["uploaded_csv"] = uploaded_file  # Guardamos en session_state
+            dtrain = xgb.DMatrix(X, label=y)
+            params = {
+                "objective": "reg:squarederror",
+                "max_depth": 5,
+                "eta": 0.09,
+                "subsample": 0.9,
+                "colsample_bytree": 0.80,
+                "seed": 42,
+                "eval_metric": "rmse"
+            }
 
-    if uploaded_file is not None:
-        df = pd.read_csv(uploaded_file, sep=';')
-        st.write("Vista previa de los datos:")
-        st.dataframe(df.head())
+            final_model = xgb.train(params, dtrain, num_boost_round=900)
 
-        st.write(f"Número de muestras: {df.shape[0]}")
-        st.write(f"Número de columnas: {df.shape[1]}")
+            # Guardamos el modelo en la sesión
+            st.session_state["modelo"] = final_model
+            st.session_state["X_train"] = X
+            st.session_state["trained"] = True
+            st.session_state["show_shap"] = False
 
-        # Si existe la columna 'Registro', contamos pacientes distintos
-        if "Registro" in df.columns:
-            num_pacientes = df["Registro"].nunique()
-            st.write(f"Número de pacientes diferentes: {num_pacientes}")
-        else:
-            st.warning("No se encontró la columna 'Registro' para calcular el número de pacientes diferentes.")
+        st.success("Modelo entrenado correctamente")
 
-        # Guardamos columnas 'Fecha' y 'Registro' (si existen) para futuro y las quitamos del DF
-        cols_excluir = []
-        for col in ["Fecha", "Registro"]:
-            if col in df.columns:
-                cols_excluir.append(col)
+# -------------------------------------------------------
+# MOSTRAR IMPORTANCIA DE CARACTERÍSTICAS CON SHAP
+# -------------------------------------------------------
+if st.session_state.get("trained", False):
+    if st.button("Ver Importancia de Características (SHAP)"):
+        st.session_state["show_shap"] = True
 
-        if cols_excluir:
-            st.session_state["excluidas"] = df[cols_excluir].copy()
-            df = df.drop(columns=cols_excluir)
+if st.session_state.get("show_shap", False):
+    with st.spinner("Calculando valores SHAP..."):
+        explainer = shap.TreeExplainer(st.session_state["modelo"])
+        shap_values = explainer.shap_values(st.session_state["X_train"])
 
-        # Selectores en dos columnas
-        col1, col2 = st.columns(2)
-        with col1:
-            target_col = st.selectbox("Variable objetivo", ["FEV1por_Actualpor"])
-        with col2:
-            algo = st.selectbox("Algoritmo", ["XGBoost"])
-
-        # Botón para iniciar el entrenamiento
-        if st.button("Iniciar Entrenamiento"):
-            with st.spinner("Entrenando el modelo (Validación cruzada de K=10 iteraciones)..."):
-                X = df.drop(columns=[target_col])
-                y = df[target_col]
-
-                dtrain = xgb.DMatrix(X, label=y)
-                params = {
-                    "objective": "reg:squarederror",
-                    "max_depth": 5,
-                    "eta": 0.09,
-                    "subsample": 0.9,
-                    "colsample_bytree": 0.80,
-                    "seed": 42,
-                    "eval_metric": "rmse"
-                }
-
-                cv_results = xgb.cv(
-                    params=params,
-                    dtrain=dtrain,
-                    num_boost_round=1000,
-                    nfold=10,
-                    early_stopping_rounds=200,
-                    as_pandas=True,
-                    seed=42
-                )
-
-                best_iteration = cv_results.shape[0]
-                best_rmse = cv_results["test-rmse-mean"].iloc[-1]
-
-                final_model = xgb.train(params, dtrain, num_boost_round=best_iteration)
-
-                # Guardamos en session_state para mostrar después
-                st.session_state["modelo"] = final_model
-                st.session_state["X_train"] = X
-                st.session_state["best_iteration"] = best_iteration
-                st.session_state["best_rmse"] = best_rmse
-                st.session_state["trained"] = True
-                st.session_state["show_shap"] = False  # reiniciamos el SHAP
-    else:
-        st.info("Por favor, sube un archivo CSV para entrenar el modelo.")
-
-    # ----------------------------------------------------------------
-    # MOSTRAR RESULTADOS SOLO SI YA HAY MODELO ENTRENADO
-    # ----------------------------------------------------------------
-    if st.session_state.get("trained", False):
-        st.success("Modelo entrenado")
-        st.write(f"Mejor iteración (round): {st.session_state['best_iteration']}")
-        st.write(f"RMSE validación (mean): {st.session_state['best_rmse']:.4f}")
-
-        # Botón para ver la importancia de características (SHAP)
-        if st.button("Ver Importancia de Características (SHAP)"):
-            st.session_state["show_shap"] = True
-
-    # ----------------------------------------------------------------
-    # MOSTRAR GRÁFICO SHAP SI EL USUARIO LO SOLICITÓ
-    # ----------------------------------------------------------------
-    if st.session_state.get("show_shap", False):
-        with st.spinner("Calculando valores SHAP..."):
-            explainer = shap.TreeExplainer(st.session_state["modelo"])
-            shap_values = explainer.shap_values(st.session_state["X_train"])
-
-            st.write("Gráfico SHAP de la importancia de las características:")
-            # Tamaño de figura más pequeño
-            plt.figure(figsize=(3, 2))  
-            shap.summary_plot(shap_values, st.session_state["X_train"], show=False)
-            fig = plt.gcf()
-            st.pyplot(fig)
-
-    st.markdown("</div>", unsafe_allow_html=True)  # fin de la card
-
-
+        st.write("Gráfico SHAP de la importancia de características:")
+        plt.figure(figsize=(4, 3))
+        shap.summary_plot(shap_values, st.session_state["X_train"], show=False)
+        fig = plt.gcf()
+        st.pyplot(fig)
 
 # -----------------------------------------------------------
 # TAB DE PREDICCIÓN
