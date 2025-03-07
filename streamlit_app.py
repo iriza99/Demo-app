@@ -137,7 +137,7 @@ with tab_entrenar:
 
         # Botón para iniciar el entrenamiento
         if st.button("Iniciar Entrenamiento"):
-            with st.spinner("Entrenando el modelo con validación cruzada de k=10 iteraciones..."):
+            with st.spinner("Entrenando el modelo (Validación cruzada de K=10 iteraciones)..."):
                 X = df.drop(columns=[target_col])
                 y = df[target_col]
 
@@ -155,9 +155,9 @@ with tab_entrenar:
                 cv_results = xgb.cv(
                     params=params,
                     dtrain=dtrain,
-                    num_boost_round=1500,
+                    num_boost_round=1000,
                     nfold=10,
-                    early_stopping_rounds=300,
+                    early_stopping_rounds=200,
                     as_pandas=True,
                     seed=42
                 )
