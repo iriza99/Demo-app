@@ -1,7 +1,12 @@
-streamlit
 altair==5.5.0
 attrs==25.1.0
+autogluon.common==1.2
+autogluon.core==1.2
+autogluon.features==1.2
+autogluon.tabular==1.2
 blinker==1.9.0
+boto3==1.37.9
+botocore==1.37.9
 cachetools==5.5.2
 certifi==2025.1.31
 charset-normalizer==3.4.1
@@ -14,6 +19,7 @@ gitdb==4.0.11
 GitPython==3.1.41
 idna==3.10
 Jinja2==3.1.6
+jmespath==1.0.1
 joblib==1.4.2
 jsonschema==4.23.0
 jsonschema-specifications==2024.10.1
@@ -22,6 +28,7 @@ llvmlite==0.43.0
 MarkupSafe==3.0.2
 matplotlib==3.10.1
 narwhals==1.29.1
+networkx==3.4.2
 numba==0.60.0
 numpy==2.0.2
 nvidia-nccl-cu12==2.25.1
@@ -29,6 +36,7 @@ packaging==24.2
 pandas==2.2.3
 pillow==11.1.0
 protobuf==5.29.3
+psutil==6.1.1
 pyarrow==19.0.1
 pydeck==0.9.1
 pyparsing==3.2.1
@@ -37,7 +45,8 @@ pytz==2025.1
 referencing==0.36.2
 requests==2.32.3
 rpds-py==0.23.1
-scikit-learn==1.6.1
+s3transfer==0.11.4
+scikit-learn==1.5.2
 scipy==1.15.2
 shap==0.46.0
 six==1.17.0
