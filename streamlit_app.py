@@ -3,21 +3,24 @@ import shap
 import pandas as pd
 import xgboost as xgb
 import matplotlib.pyplot as plt
+import os
+import shutil
+import zipfile
 
-# Importamos AutoGluon
 from autogluon.tabular import TabularPredictor
 
-# Configuración general de la página
+# -------------------------------------------------------------------
+# CONFIGURACIÓN DE PÁGINA
+# -------------------------------------------------------------------
 st.set_page_config(
     page_title="Predicción de FEV1 (beta)",
     layout="wide"
 )
 
-# CSS para estilo de “card” y botón personalizado
 css = """
 <style>
 .card {
-  background-color: #F3F8FE; /* fondo claro */
+  background-color: #F3F8FE;
   padding: 1.5rem;
   border-radius: 0.5rem;
   margin-bottom: 1rem;
@@ -46,321 +49,478 @@ css = """
 .train-button:hover {
   background-color: #00a48d;
 }
-.selectors {
-  display: flex;
-  gap: 1rem;
-  margin-top: 1rem;
-}
-.selector-box {
-  flex: 1;
-}
-label {
-  font-weight: 600;
-  color: #333;
-}
 </style>
 """
 st.markdown(css, unsafe_allow_html=True)
 
-# Título principal y descripción
-st.title("Predicción de FEV1 (%)")
-st.markdown("""
-Esta aplicación entrena un modelo **XGBoost** o **AutoGluon** para predecir el **FEV1** (Volumen Espiratorio Forzado en el primer segundo),
-un indicador clave en el seguimiento de pacientes con trasplante de pulmón.
-Sube tu archivo CSV con los datos clínicos, entrena el modelo y luego genera predicciones en la pestaña correspondiente.
-""")
+# -------------------------------------------------------------------
+# FUNCIONES AUXILIARES
+# -------------------------------------------------------------------
+def remove_previous_xgb_model():
+    model_file = "xgboost_model.json"
+    if os.path.exists(model_file):
+        os.remove(model_file)
 
-# Creamos dos pestañas: “Entrenamiento” y “Predicción”
+def remove_previous_autogluon_model():
+    model_dir = "autogluon_model"
+    if os.path.exists(model_dir) and os.path.isdir(model_dir):
+        shutil.rmtree(model_dir, ignore_errors=True)
+
+def download_xgb_model(model):
+    model_file = "xgboost_model.json"
+    model.save_model(model_file)
+    with open(model_file, "rb") as f:
+        model_bytes = f.read()
+    st.download_button(
+        label="Descargar modelo XGBoost",
+        data=model_bytes,
+        file_name=model_file,
+        mime="application/octet-stream"
+    )
+
+def download_autogluon_model(predictor):
+    model_dir = "autogluon_model"
+    predictor.save(model_dir)
+    zip_filename = "autogluon_model.zip"
+    with zipfile.ZipFile(zip_filename, "w", zipfile.ZIP_DEFLATED) as zipf:
+        for root, dirs, files in os.walk(model_dir):
+            for file in files:
+                filepath = os.path.join(root, file)
+                arcname = os.path.relpath(filepath, start=model_dir)
+                zipf.write(filepath, arcname=arcname)
+    with open(zip_filename, "rb") as f:
+        zip_bytes = f.read()
+    st.download_button(
+        label="Descargar modelo AutoGluon",
+        data=zip_bytes,
+        file_name=zip_filename,
+        mime="application/octet-stream"
+    )
+
+def load_xgb_model(uploaded_file):
+    temp_name = "temp_xgb_model.json"
+    with open(temp_name, "wb") as f:
+        f.write(uploaded_file.getvalue())
+    bst = xgb.Booster()
+    bst.load_model(temp_name)
+    return bst
+
+def load_autogluon_model(uploaded_file):
+    temp_zip = "temp_autogluon_model.zip"
+    with open(temp_zip, "wb") as f:
+        f.write(uploaded_file.getvalue())
+    extract_dir = "autogluon_model"
+    if os.path.exists(extract_dir):
+        shutil.rmtree(extract_dir, ignore_errors=True)
+    with zipfile.ZipFile(temp_zip, "r") as zip_ref:
+        zip_ref.extractall(extract_dir)
+    predictor = TabularPredictor.load(extract_dir)
+    return predictor
+
+# -------------------------------------------------------------------
+# TÍTULO DE LA APP
+# -------------------------------------------------------------------
+st.title("Predicción de FEV1 (%)")
+st.markdown(
+    """
+    Esta aplicación entrena o carga un modelo para predecir el **FEV1** (Volumen Espiratorio Forzado en el primer segundo).  
+    Sube tu archivo CSV con los datos clínicos, selecciona el algoritmo, y realiza predicciones en la pestaña correspondiente.
+    """
+)
+
+# -------------------------------------------------------------------
+# CREACIÓN DE TABS PRINCIPALES
+# -------------------------------------------------------------------
 tab_entrenar, tab_predecir = st.tabs(["Entrenamiento", "Predicción"])
 
 # -----------------------------------------------------------
 # TAB DE ENTRENAMIENTO
 # -----------------------------------------------------------
-
-import streamlit as st
-import pandas as pd
-import xgboost as xgb
-from autogluon.tabular import TabularPredictor
-import shap
-import matplotlib.pyplot as plt
-
-# -----------------------------------------------------------
-# TAB DE ENTRENAMIENTO
-# -----------------------------------------------------------
-
 with tab_entrenar:
     st.markdown("<div class='card'>", unsafe_allow_html=True)
-    st.markdown("<h2>Entrenamiento de Modelo</h2>", unsafe_allow_html=True)
-    st.markdown("""
-    <p>
-    Configura y entrena tu modelo de Machine Learning con tu dataset. Primero, carga tu CSV (separado por ';') y asegúrate
-    de que contenga la columna <strong>FEV1por_Actualpor</strong> junto con 
-    otras variables que consideres relevantes (edad, tiempo post-trasplante, etc.).
-    </p>
-    """, unsafe_allow_html=True)
+    st.markdown("<h2>Entrenamiento / Carga de Modelo</h2>", unsafe_allow_html=True)
 
-    # Si el CSV se borra, reiniciamos todo el estado
-    if "uploaded_csv" in st.session_state and st.session_state["uploaded_csv"] is not None:
-        if st.session_state["uploaded_csv"] is None:
-            st.session_state.clear()
-            st.experimental_rerun()
+    # Selección inicial: cargar modelo o entrenar nuevo
+    user_choice = st.radio(
+        "¿Deseas cargar un modelo existente o entrenar uno nuevo?",
+        ("Cargar Modelo", "Entrenar Modelo Nuevo"),
+        index=1
+    )
 
-    # Subir dataset
-    uploaded_file = st.file_uploader("Selecciona tu CSV", type=["csv"])
-    st.session_state["uploaded_csv"] = uploaded_file  # Guardamos en session_state
-
-    if uploaded_file is not None:
-        df = pd.read_csv(uploaded_file, sep=';')
-        st.write("Vista previa de los datos:")
-        st.dataframe(df.head())
-
-        st.write(f"Número de muestras: {df.shape[0]}")
-        st.write(f"Número de columnas: {df.shape[1]}")
-
-        # Si existe la columna 'Registro', contamos pacientes distintos
-        if "Registro" in df.columns:
-            num_pacientes = df["Registro"].nunique()
-            st.write(f"Número de pacientes diferentes: {num_pacientes}")
-        else:
-            st.warning("No se encontró la columna 'Registro' para calcular el número de pacientes diferentes.")
-
-        # Guardamos columnas 'Fecha' y 'Registro' (si existen) para futuro y las quitamos del DF
-        cols_excluir = []
-        for col in ["Fecha", "Registro"]:
-            if col in df.columns:
-                cols_excluir.append(col)
-
-        if cols_excluir:
-            st.session_state["excluidas"] = df[cols_excluir].copy()
-            df = df.drop(columns=cols_excluir)
-
-        # Selectores en dos columnas
-        col1, col2 = st.columns(2)
-        with col1:
-            target_col = st.selectbox("Variable objetivo", ["FEV1por_Actualpor"])
-        with col2:
-            algo = st.selectbox("Algoritmo", ["XGBoost", "AutoGluon"])
-
-        # Si el usuario elige AutoGluon, permitimos especificar tiempo de entrenamiento (en minutos)
-        time_limit_minutes = 0
-        if algo == "AutoGluon":
-            time_limit_minutes = st.number_input(
-                "Tiempo de entrenamiento (minutos)",
-                min_value=1, max_value=120, value=10
+    # ----------------------------
+    # OPCIÓN 1: Cargar Modelo Existente
+    # ----------------------------
+    if user_choice == "Cargar Modelo":
+        with st.expander("Cargar modelo entrenado", expanded=True):
+            model_type_to_load = st.selectbox(
+                "Tipo de modelo a cargar:",
+                ["XGBoost", "AutoGluon"],
+                help="Selecciona el tipo de modelo que deseas cargar."
             )
+            uploaded_model_file = st.file_uploader(
+                "Selecciona el archivo del modelo (XGBoost: .json | AutoGluon: .zip)",
+                type=["json", "zip"],
+                key="model_upload"
+            )
+            if uploaded_model_file is not None:
+                if st.button("Cargar Modelo"):
+                    with st.spinner("Cargando modelo..."):
+                        remove_previous_xgb_model()
+                        remove_previous_autogluon_model()
 
-        # Botón para iniciar el entrenamiento
-        if st.button("Iniciar Entrenamiento"):
-            X = df.drop(columns=[target_col])
-            y = df[target_col]
+                        if model_type_to_load == "XGBoost":
+                            bst = load_xgb_model(uploaded_model_file)
+                            st.session_state["modelo"] = bst
+                            st.session_state["algo"] = "XGBoost"
+                            st.success("Modelo XGBoost cargado correctamente.")
+                        else:
+                            predictor = load_autogluon_model(uploaded_model_file)
+                            st.session_state["modelo"] = predictor
+                            st.session_state["algo"] = "AutoGluon"
+                            st.success("Modelo AutoGluon cargado correctamente.")
 
-            if algo == "XGBoost":
-                with st.spinner("Entrenando el modelo con XGBoost y validación cruzada (10-fold)..."):
-                    dtrain = xgb.DMatrix(X, label=y)
-                    params = {
-                        "objective": "reg:squarederror",
-                        "max_depth": 5,
-                        "eta": 0.09,
-                        "subsample": 0.9,
-                        "colsample_bytree": 0.80,
-                        "seed": 42,
-                        "eval_metric": "rmse"
-                    }
+                        # Marcamos como "entrenado" para habilitar la predicción,
+                        # pero indicamos que se ha cargado un modelo (no entrenado aquí).
+                        st.session_state["trained"] = True
+                        st.session_state["model_loaded"] = True
 
-                    # Validación cruzada con 10 folds
-                    cv_results = xgb.cv(
-                        params=params,
-                        dtrain=dtrain,
-                        num_boost_round=1000,
-                        nfold=10,
-                        metrics=["rmse"],
-                        seed=42
-                    )
+                        # Borramos posibles métricas y X_train (ya que no queremos mostrar nada de eso).
+                        st.session_state.pop("xgb_metrics", None)
+                        st.session_state.pop("X_train", None)
 
-                    # Guardamos el dataframe de resultados en session_state
-                    st.session_state["xgb_cv_results"] = cv_results
-
-                    # Entrenamos el modelo final
-                    final_model = xgb.train(params, dtrain, num_boost_round=1000)
-
-                # Guardamos en session_state
-                st.session_state["modelo"] = final_model
-                st.session_state["X_train"] = X
-                st.session_state["trained"] = True
-                st.session_state["show_shap"] = False
-                st.session_state["algo"] = "XGBoost"
-                st.success("Modelo XGBoost entrenado con éxito (con CV de 10-fold).")
-
-            else:
-                # Entrenamos con AutoGluon
-                with st.spinner("Entrenando el modelo con AutoGluon..."):
-                    train_data = pd.concat([X, y], axis=1)
-
-                    # Solo usar algoritmos de árboles
-                    hyperparameters = {
-                        'GBM': {},   # LightGBM
-                        'CAT': {},   # CatBoost
-                        'XGB': {},   # XGBoost
-                    }
-
-                    # Convertimos a segundos
-                    time_limit_seconds = time_limit_minutes * 60
-
-                    predictor = TabularPredictor(
-                        label=target_col,
-                        eval_metric="root_mean_squared_error"
-                    ).fit(
-                        train_data=train_data,
-                        time_limit=time_limit_seconds,
-                        hyperparameters=hyperparameters
-                    )
-
-                st.session_state["modelo"] = predictor
-                st.session_state["X_train"] = X
-                st.session_state["trained"] = True
-                st.session_state["show_shap"] = False
-                st.session_state["algo"] = "AutoGluon"
-                st.success("Modelo AutoGluon entrenado con éxito.")
-
-                # Guardamos el leaderboard para mostrarlo después
-                st.session_state["autogluon_leaderboard"] = predictor.leaderboard(silent=True)
-
+    # ----------------------------
+    # OPCIÓN 2: Entrenar Modelo Nuevo
+    # ----------------------------
     else:
-        st.info("Por favor, sube un archivo CSV para entrenar el modelo.")
+        # Cuando entrenamos un modelo, indicamos que no es un modelo cargado.
+        st.session_state["model_loaded"] = False
 
-    # ----------------------------------------------------------------
-    # MOSTRAR RESULTADOS (XGBoost CV y AutoGluon leaderboard) FUERA DEL BOTÓN
-    # ----------------------------------------------------------------
-    # 1) Mostramos resultados de XGBoost si existen
-    if st.session_state.get("algo") == "XGBoost" and "xgb_cv_results" in st.session_state:
-        st.write("## Resultados XGBoost")
-        cv_results = st.session_state["xgb_cv_results"]
+        with st.expander("Entrenar un modelo nuevo", expanded=True):
+            uploaded_file = st.file_uploader(
+                "Selecciona tu CSV para entrenamiento",
+                type=["csv"],
+                key="csv_training",
+                help="El archivo debe estar separado por ';'."
+            )
+            if uploaded_file is not None:
+                df = pd.read_csv(uploaded_file, sep=';')
+                st.write("Vista previa de los datos:")
+                st.dataframe(df.head())
+                st.write(f"Número de muestras: {df.shape[0]}")
+                st.write(f"Número de columnas: {df.shape[1]}")
 
-        # Métricas finales (última fila)
-        final_train_rmse = cv_results["train-rmse-mean"].iloc[-1]
-        final_test_rmse = cv_results["test-rmse-mean"].iloc[-1]
-        st.write(f"**RMSE final (entrenamiento)**: {final_train_rmse:.4f}")
-        st.write(f"**RMSE final (validación)**: {final_test_rmse:.4f}")
+                # Guardamos aparte las columnas de interés (Train) si existen
+                df_train_info = None
+                if all(col in df.columns for col in ["Registro", "Fecha", "FEV1por_Actualpor"]):
+                    df_train_info = df[["Registro", "Fecha", "FEV1por_Actualpor"]].copy()
 
-    # 2) Mostramos leaderboard de AutoGluon si existe
-    if st.session_state.get("algo") == "AutoGluon" and "autogluon_leaderboard" in st.session_state:
-        st.write("## Leaderboard de modelos - AutoGluon")
-        st.dataframe(st.session_state["autogluon_leaderboard"])
+                # Contar pacientes si existe 'Registro'
+                if "Registro" in df.columns:
+                    num_pacientes = df["Registro"].nunique()
+                    st.write(f"Número de pacientes diferentes: {num_pacientes}")
 
-    # ----------------------------------------------------------------
-    # SHAP para XGBoost (opcional)
-    # ----------------------------------------------------------------
-    if st.session_state.get("trained", False) and st.session_state.get("algo") == "XGBoost":
-        # Botón para ver la importancia de características (SHAP)
-        if st.button("Ver Importancia de Características (SHAP)"):
-            st.session_state["show_shap"] = True
+                # Para entrenar el modelo, quitamos 'Fecha' y 'Registro'
+                cols_excluir = [col for col in ["Fecha", "Registro"] if col in df.columns]
+                if cols_excluir:
+                    df = df.drop(columns=cols_excluir)
 
-        if st.session_state.get("show_shap", False):
-            with st.spinner("Calculando valores SHAP..."):
-                explainer = shap.TreeExplainer(st.session_state["modelo"])
-                shap_values = explainer.shap_values(st.session_state["X_train"])
+                # Selectores
+                col1, col2 = st.columns(2)
+                with col1:
+                    target_col = st.selectbox(
+                        "Variable objetivo",
+                        ["FEV1por_Actualpor"],
+                        help="Selecciona la columna que deseas predecir."
+                    )
+                with col2:
+                    algo = st.selectbox(
+                        "Algoritmo a entrenar",
+                        ["XGBoost", "AutoGluon"],
+                        help="XGBoost: rápido y con explicaciones visuales (SHAP).&#10; AutoGluon: mayor precisión."
+                    )
 
-                st.write("Gráfico SHAP de la importancia de las características:")
-                plt.figure(figsize=(3, 2))  
-                shap.summary_plot(shap_values, st.session_state["X_train"], show=False)
-                fig = plt.gcf()
-                st.pyplot(fig)
+                time_limit_minutes = 0
+                if algo == "AutoGluon":
+                    time_limit_minutes = st.number_input(
+                        "Tiempo de entrenamiento (minutos)",
+                        min_value=1,
+                        max_value=120,
+                        value=10,
+                        help="Define el tiempo máximo de entrenamiento para AutoGluon."
+                    )
 
-    st.markdown("</div>", unsafe_allow_html=True)
+                if st.button("Iniciar Entrenamiento", key="train_button"):
+                    # Borramos modelo anterior
+                    remove_previous_xgb_model()
+                    remove_previous_autogluon_model()
+
+                    X = df.drop(columns=[target_col])
+                    y = df[target_col]
+
+                    if algo == "XGBoost":
+                        with st.spinner("Entrenando XGBoost con validación cruzada (k=10)..."):
+                            dtrain = xgb.DMatrix(X, label=y)
+                            params = {
+                                "objective": "reg:squarederror",
+                                "max_depth": 5,
+                                "eta": 0.09,
+                                "subsample": 0.9,
+                                "colsample_bytree": 0.80,
+                                "seed": 42,
+                                "eval_metric": "rmse"
+                            }
+                            cv_results = xgb.cv(
+                                params=params,
+                                dtrain=dtrain,
+                                num_boost_round=100,
+                                nfold=10,
+                                metrics=["rmse"],
+                                seed=42
+                            )
+                            final_train_rmse = cv_results["train-rmse-mean"].iloc[-1]
+                            final_test_rmse = cv_results["test-rmse-mean"].iloc[-1]
+                            final_model = xgb.train(params, dtrain, num_boost_round=100)
+
+                        st.session_state["modelo"] = final_model
+                        st.session_state["algo"] = "XGBoost"
+                        st.session_state["X_train"] = X  # Para SHAP
+                        st.session_state["trained"] = True
+                        st.session_state["model_loaded"] = False
+
+                  
+
 
 
 # -----------------------------------------------------------
 # TAB DE PREDICCIÓN
 # -----------------------------------------------------------
-
 with tab_predecir:
     st.markdown("<div class='card'>", unsafe_allow_html=True)
     st.markdown("<h2>Predicción</h2>", unsafe_allow_html=True)
-    st.markdown("""
-    <p>
-    Sube un archivo CSV para generar predicciones con el modelo entrenado. 
-    Debe contener las mismas columnas de entrada (excepto FEV1) que usaste en el entrenamiento.
-    </p>
-    """, unsafe_allow_html=True)
+    st.markdown(
+        """
+        <p>
+        Sube un archivo CSV para generar predicciones con el modelo entrenado.  
+        El CSV debe contener las mismas columnas de entrada (excepto la variable objetivo) que se usaron en el entrenamiento.
+        </p>
+        """,
+        unsafe_allow_html=True
+    )
 
-    # Subir archivo para predecir
+    # 1) Subir CSV de test
     pred_file = st.file_uploader("Selecciona tu CSV para predecir", type=["csv"], key="pred")
 
+    # Solo si se sube un archivo
     if pred_file is not None:
-        df_pred = pd.read_csv(pred_file, sep=';')
+        # Cargamos el CSV si es nuevo o cambió el nombre
+        if ("df_pred_full" not in st.session_state) or (st.session_state.get("pred_file_name") != pred_file.name):
+            df_pred_full = pd.read_csv(pred_file, sep=';')
+            st.session_state["df_pred_full"] = df_pred_full
+            st.session_state["pred_file_name"] = pred_file.name
+            st.session_state["predictions_done"] = False
 
-        # Eliminamos las columnas "Fecha" y "Registro" si existen
-        cols_excluir = [col for col in ["Fecha", "Registro"] if col in df_pred.columns]
-        df_pred_limpio = df_pred.drop(columns=cols_excluir, errors="ignore")
+        # Mensaje informativo (no mostramos tabla)
+        st.info("Archivo CSV cargado correctamente. Presiona 'Predecir' para generar predicciones.")
 
-        st.write("Vista previa de los datos a predecir:")
-        st.dataframe(df_pred.head())
-
-        # Botón para generar predicciones
+        # 2) Botón "Predecir"
         if st.button("Predecir"):
-            with st.spinner("Generando predicciones..."):
-                if "modelo" in st.session_state:
-                    # Distinguimos entre XGBoost y AutoGluon
-                    if st.session_state.get("algo") == "XGBoost":
+            if "modelo" not in st.session_state:
+                st.warning("No hay un modelo entrenado. Ve a la pestaña de Entrenamiento.")
+            else:
+                algo_actual = st.session_state["algo"]
+                # Se crea un DataFrame sin las columnas 'Fecha' y 'Registro' para la predicción
+                df_pred_limpio = st.session_state["df_pred_full"].drop(columns=["Fecha", "Registro"], errors="ignore")
+
+                with st.spinner("Generando predicciones..."):
+                    if algo_actual == "XGBoost":
                         dtest = xgb.DMatrix(df_pred_limpio)
                         preds = st.session_state["modelo"].predict(dtest)
                     else:
-                        # AutoGluon
-                        preds = st.session_state["modelo"].predict(df_pred_limpio)
+                        predictor = st.session_state["modelo"]
+                        preds = predictor.predict(df_pred_limpio)
 
-                    # Insertamos la columna "Predicción" en la primera posición
-                    df_pred.insert(0, "Predicción", preds)
-                    st.write("Resultados:")
-                    st.dataframe(df_pred)
+                    # Insertar o reemplazar la columna "predicciones"
+                    if "predicciones" in st.session_state["df_pred_full"].columns:
+                        st.session_state["df_pred_full"].drop(columns=["predicciones"], inplace=True)
+                    st.session_state["df_pred_full"].insert(0, "predicciones", preds)
 
-                    # Opción para descargar el CSV con predicciones
-                    csv_data = df_pred.to_csv(index=False).encode("utf-8")
-                    st.download_button(
-                        label="Descargar CSV con predicciones",
-                        data=csv_data,
-                        file_name="predicciones.csv",
-                        mime="text/csv"
-                    )
+                # Marcamos que ya se han hecho predicciones
+                st.session_state["predictions_done"] = True
 
-                    # Guardamos los datos en session_state para SHAP (solo si quisiéramos)
-                    st.session_state["df_pred"] = df_pred_limpio
-                    st.session_state["predicciones"] = preds
-                else:
-                    st.warning("No hay un modelo entrenado. Ve a la pestaña de Entrenamiento primero.")
     else:
         st.info("Por favor, sube un archivo CSV para predecir.")
 
     # ----------------------------------------------------------------
-    # SELECCIÓN DE UNA FILA PARA SHAP (SOLO XGBOOST EN ESTE EJEMPLO)
+    # Mostrar la tabla con predicciones y los sub-tabs si ya se generaron
     # ----------------------------------------------------------------
-    if "df_pred" in st.session_state and st.session_state.get("algo") == "XGBoost":
-        st.markdown("<hr>", unsafe_allow_html=True)
-        st.markdown("<h3>Explicación con SHAP</h3>", unsafe_allow_html=True)
+    if (
+        "df_pred_full" in st.session_state 
+        and st.session_state.get("predictions_done", False) 
+        and "predicciones" in st.session_state["df_pred_full"].columns
+    ):
+        # Tabla con predicciones
+        st.markdown("### Resultados con predicciones:")
+        st.dataframe(st.session_state["df_pred_full"])
+        csv_data = st.session_state["df_pred_full"].to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="Descargar CSV con predicciones",
+            data=csv_data,
+            file_name="predicciones.csv",
+            mime="text/csv"
+        )
 
-        idx = st.selectbox("Selecciona un índice para analizar con SHAP:", st.session_state["df_pred"].index)
+        # Mostrar los sub-tabs (SHAP y Evolución) solo si existe un modelo entrenado
+        if "modelo" in st.session_state:
+            algo_actual = st.session_state["algo"]
+            if algo_actual == "XGBoost":
+                subtab_shap_pred, subtab_evol = st.tabs(["Explicación con SHAP", "Evolución de Pacientes"])
+            else:
+                (subtab_evol,) = st.tabs(["Evolución de Pacientes"])
 
-        if st.button("Explicar con SHAP"):
-            with st.spinner("Calculando valores SHAP..."):
-                explainer = shap.TreeExplainer(st.session_state["modelo"])
-                shap_values = explainer.shap_values(st.session_state["df_pred"])
+            # -----------------------------------------------------------
+            # SUB-TAB SHAP (solo para XGBoost)
+            # -----------------------------------------------------------
+            if algo_actual == "XGBoost":
+                with subtab_shap_pred:
+                    st.markdown("<h3>Explicación con SHAP</h3>", unsafe_allow_html=True)
+                    df_pred_full = st.session_state["df_pred_full"]
+                    # Verificar existencia de las columnas necesarias
+                    if "Registro" not in df_pred_full.columns or "Fecha" not in df_pred_full.columns:
+                        st.warning("No se encontró la columna 'Registro' o 'Fecha' en el CSV de test.")
+                    else:
+                        # Filtrado por paciente y fecha
+                        registros_unicos = df_pred_full["Registro"].astype(str).str.strip().unique()
+                        selected_registro = st.selectbox("Selecciona ID Paciente (Registro):", registros_unicos)
+                        subdf = df_pred_full[df_pred_full["Registro"].astype(str).str.strip() == selected_registro]
+                        fechas_unicas = subdf["Fecha"].unique()
+                        selected_fecha = st.selectbox("Selecciona la Fecha:", fechas_unicas)
+                        subdf = subdf[subdf["Fecha"] == selected_fecha]
+                        if subdf.empty:
+                            st.warning("No se encontró esa combinación de registro y fecha.")
+                        else:
+                            # Reseteamos el índice para que la fila a explicar sea la posición 0
+                            subdf_reset = subdf.reset_index(drop=True)
+                            # Extraer las características removiendo 'Fecha', 'Registro' y 'predicciones'
+                            subdf_features = subdf_reset.drop(columns=["Fecha", "Registro", "predicciones"], errors="ignore")
+                            if st.button("Explicar con SHAP", key="shap_button"):
+                                with st.spinner("Calculando valores SHAP..."):
+                                    explainer = shap.TreeExplainer(st.session_state["modelo"])
+                                    shap_values = explainer.shap_values(subdf_features)
+                                    st.write(f"Explicación SHAP para paciente {selected_registro}, fecha {selected_fecha}:")
+                                    plt.figure(figsize=(6, 4))
+                                    shap.force_plot(
+                                        explainer.expected_value,
+                                        shap_values[0],
+                                        subdf_features.iloc[0, :],
+                                        matplotlib=True
+                                    )
+                                    st.pyplot(plt.gcf())
+                                    st.write("Desglose de la predicción")
+                                    fig, ax = plt.subplots(figsize=(6, 4))
+                                    shap.waterfall_plot(shap.Explanation(
+                                        values=shap_values[0],
+                                        base_values=explainer.expected_value,
+                                        data=subdf_features.iloc[0, :]
+                                    ))
+                                    st.pyplot(fig)
 
-                st.write(f"Explicación SHAP para la muestra en el índice {idx}:")
-                plt.figure(figsize=(6, 4))  
-                shap.force_plot(
-                    explainer.expected_value,
-                    shap_values[idx],
-                    st.session_state["df_pred"].iloc[idx, :],
-                    matplotlib=True
-                )
-                st.pyplot(plt)
+            # -----------------------------------------------------------
+            # SUB-TAB EVOLUCIÓN (Train + Test o solo Test si no hay datos de train)
+            # -----------------------------------------------------------
+            with subtab_evol:
+                st.markdown("<h3>Gráfico de evolución de pacientes</h3>", unsafe_allow_html=True)
+                df_pred_full = st.session_state["df_pred_full"]
+                df_train_info = st.session_state.get("df_train_info", None)
 
-                st.write("Desglose de la predicción")
-                fig, ax = plt.subplots(figsize=(6, 4))
-                shap.waterfall_plot(shap.Explanation(
-                    values=shap_values[idx],
-                    base_values=explainer.expected_value,
-                    data=st.session_state["df_pred"].iloc[idx, :]
-                ))
-                st.pyplot(fig)
+                if df_train_info is None:
+                    st.info("No hay datos anteriores de entrenamiento. Se muestran únicamente las predicciones.")
+                    df_evol = df_pred_full.copy()
+                    df_evol["Split"] = "Test"
+                    # Convertir la columna Fecha si existe
+                    if "Fecha" in df_evol.columns:
+                        df_evol["Fecha"] = pd.to_datetime(df_evol["Fecha"], format="%d/%m/%Y", errors="coerce")
+                    # Si se encuentra la columna 'Registro', se puede filtrar por paciente
+                    if "Registro" in df_evol.columns:
+                        df_evol["Registro"] = df_evol["Registro"].astype(str).str.strip()
+                        selected_registro = st.selectbox("Selecciona el ID del paciente (Registro):", df_evol["Registro"].unique())
+                        df_evol = df_evol[df_evol["Registro"] == selected_registro].copy()
+                    else:
+                        selected_registro = None
+                    if not df_evol.empty:
+                        plt.figure(figsize=(10, 5))
+                        plt.plot(
+                            df_evol["Fecha"],
+                            df_evol["predicciones"],
+                            label="Predicciones",
+                            color="red",
+                            marker='o'
+                        )
+                        plt.xlabel("Fecha")
+                        plt.ylabel("FEV1")
+                        title = f"Evolución de predicción para el paciente {selected_registro}" if selected_registro else "Evolución de predicción"
+                        plt.title(title)
+                        plt.legend()
+                        st.pyplot(plt.gcf())
+                    else:
+                        st.warning("No se encontraron datos para graficar.")
+                else:
+                    # Si existen datos de entrenamiento, se combinan con los de test
+                    df_train = df_train_info.copy()
+                    df_train["predicciones"] = float("nan")
+                    df_train["Split"] = "Train"
+                    df_train["Fecha"] = pd.to_datetime(df_train["Fecha"], format="%Y-%m-%d", errors="coerce")
 
-    st.markdown("</div>", unsafe_allow_html=True)  # fin de la card
+                    df_test = df_pred_full.copy()
+                    df_test["Split"] = "Test"
+                    if "FEV1por_Actualpor" not in df_test.columns:
+                        df_test["FEV1por_Actualpor"] = float("nan")
+                    df_test["Fecha"] = pd.to_datetime(df_test["Fecha"], format="%d/%m/%Y", errors="coerce")
+
+                    df_evol = pd.concat([df_train, df_test], ignore_index=True)
+                    df_evol["Registro"] = df_evol["Registro"].astype(str).str.strip()
+                    selected_registro = st.selectbox("Selecciona el ID del paciente (Registro):", df_evol["Registro"].unique())
+                    df_filtered = df_evol[df_evol["Registro"] == selected_registro].copy()
+                    df_filtered["Fecha"] = pd.to_datetime(df_filtered["Fecha"], errors="coerce")
+                    df_filtered.sort_values(["Fecha", "Split"], inplace=True)
+                    train_data = df_filtered[df_filtered["Split"] == "Train"]
+                    test_data = df_filtered[df_filtered["Split"] == "Test"]
+
+                    if not train_data.empty or not test_data.empty:
+                        plt.figure(figsize=(10, 5))
+                        if not train_data.empty:
+                            plt.plot(
+                                train_data["Fecha"],
+                                train_data["FEV1por_Actualpor"],
+                                label="Valor Real (Train)",
+                                color="blue",
+                                marker='o'
+                            )
+                        if not test_data.empty:
+                            plt.plot(
+                                test_data["Fecha"],
+                                test_data["predicciones"],
+                                label="Predicciones (Test)",
+                                color="red",
+                                marker='o'
+                            )
+                        plt.xlabel("Fecha")
+                        plt.ylabel("FEV1")
+                        plt.title(f"Evolución del paciente {selected_registro}")
+                        plt.legend()
+                        st.pyplot(plt.gcf())
+                    else:
+                        st.warning("No se encontraron datos para graficar para el paciente seleccionado.")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+
+
+
+
+
+
+
+
+
+
